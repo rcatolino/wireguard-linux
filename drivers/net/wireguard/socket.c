@@ -8,6 +8,7 @@
 #include "socket.h"
 #include "queueing.h"
 #include "messages.h"
+#include "netlink.h"
 
 #include <linux/ctype.h>
 #include <linux/net.h>
@@ -294,6 +295,10 @@ void wg_socket_set_peer_endpoint(struct wg_peer *peer,
 	dst_cache_reset(&peer->endpoint_cache);
 out:
 	write_unlock_bh(&peer->endpoint_lock);
+
+	if (peer->device->endpoint_monitor) {
+		wg_genl_mcast_peer_endpoint_change(peer);
+	}
 }
 
 void wg_socket_set_peer_endpoint_from_skb(struct wg_peer *peer,
