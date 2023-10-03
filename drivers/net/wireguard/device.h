@@ -54,6 +54,8 @@ struct wg_device {
 	unsigned int num_peers, device_update_gen;
 	u32 fwmark;
 	u16 incoming_port;
+	bool endpoint_monitor;
+	bool peers_monitor;
 };
 
 int wg_device_init(void);

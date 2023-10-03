@@ -27,7 +27,9 @@ static const struct nla_policy device_policy[WGDEVICE_A_MAX + 1] = {
 	[WGDEVICE_A_FLAGS]		= { .type = NLA_U32 },
 	[WGDEVICE_A_LISTEN_PORT]	= { .type = NLA_U16 },
 	[WGDEVICE_A_FWMARK]		= { .type = NLA_U32 },
-	[WGDEVICE_A_PEERS]		= { .type = NLA_NESTED }
+	[WGDEVICE_A_PEERS]		= { .type = NLA_NESTED },
+	[WGDEVICE_A_MONITOR]		= { .type = NLA_U8 },
+	[WGDEVICE_A_PEER]		= { .type = NLA_NESTED }
 };
 
 static const struct nla_policy peer_policy[WGPEER_A_MAX + 1] = {
@@ -102,6 +104,50 @@ struct dump_ctx {
 
 #define DUMP_CTX(cb) ((struct dump_ctx *)(cb)->args)
 
+static bool
+genlmsg_put_peer_attrs(struct wg_peer *peer, struct sk_buff *skb)
+{
+	bool fail;
+	const struct __kernel_timespec last_handshake = {
+		.tv_sec = peer->walltime_last_handshake.tv_sec,
+		.tv_nsec = peer->walltime_last_handshake.tv_nsec
+	};
+
+	down_read(&peer->handshake.lock);
+	fail = nla_put(skb, WGPEER_A_PRESHARED_KEY,
+		       NOISE_SYMMETRIC_KEY_LEN,
+		       peer->handshake.preshared_key);
+	up_read(&peer->handshake.lock);
+	if (fail)
+		return true;
+
+	if (nla_put(skb, WGPEER_A_LAST_HANDSHAKE_TIME,
+		    sizeof(last_handshake), &last_handshake) ||
+	    nla_put_u16(skb, WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL,
+			peer->persistent_keepalive_interval) ||
+	    nla_put_u64_64bit(skb, WGPEER_A_TX_BYTES, peer->tx_bytes,
+			      WGPEER_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, WGPEER_A_RX_BYTES, peer->rx_bytes,
+			      WGPEER_A_UNSPEC) ||
+	    nla_put_u32(skb, WGPEER_A_PROTOCOL_VERSION, 1))
+		return true;
+
+	read_lock_bh(&peer->endpoint_lock);
+	if (peer->endpoint.addr.sa_family == AF_INET)
+		fail = nla_put(skb, WGPEER_A_ENDPOINT,
+			       sizeof(peer->endpoint.addr4),
+			       &peer->endpoint.addr4);
+	else if (peer->endpoint.addr.sa_family == AF_INET6)
+		fail = nla_put(skb, WGPEER_A_ENDPOINT,
+			       sizeof(peer->endpoint.addr6),
+			       &peer->endpoint.addr6);
+	read_unlock_bh(&peer->endpoint_lock);
+	if (fail)
+		return true;
+
+	return false;
+}
+
 static int
 get_peer(struct wg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 {
@@ -121,41 +167,7 @@ get_peer(struct wg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 		goto err;
 
 	if (!allowedips_node) {
-		const struct __kernel_timespec last_handshake = {
-			.tv_sec = peer->walltime_last_handshake.tv_sec,
-			.tv_nsec = peer->walltime_last_handshake.tv_nsec
-		};
-
-		down_read(&peer->handshake.lock);
-		fail = nla_put(skb, WGPEER_A_PRESHARED_KEY,
-			       NOISE_SYMMETRIC_KEY_LEN,
-			       peer->handshake.preshared_key);
-		up_read(&peer->handshake.lock);
-		if (fail)
-			goto err;
-
-		if (nla_put(skb, WGPEER_A_LAST_HANDSHAKE_TIME,
-			    sizeof(last_handshake), &last_handshake) ||
-		    nla_put_u16(skb, WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL,
-				peer->persistent_keepalive_interval) ||
-		    nla_put_u64_64bit(skb, WGPEER_A_TX_BYTES, peer->tx_bytes,
-				      WGPEER_A_UNSPEC) ||
-		    nla_put_u64_64bit(skb, WGPEER_A_RX_BYTES, peer->rx_bytes,
-				      WGPEER_A_UNSPEC) ||
-		    nla_put_u32(skb, WGPEER_A_PROTOCOL_VERSION, 1))
-			goto err;
-
-		read_lock_bh(&peer->endpoint_lock);
-		if (peer->endpoint.addr.sa_family == AF_INET)
-			fail = nla_put(skb, WGPEER_A_ENDPOINT,
-				       sizeof(peer->endpoint.addr4),
-				       &peer->endpoint.addr4);
-		else if (peer->endpoint.addr.sa_family == AF_INET6)
-			fail = nla_put(skb, WGPEER_A_ENDPOINT,
-				       sizeof(peer->endpoint.addr6),
-				       &peer->endpoint.addr6);
-		read_unlock_bh(&peer->endpoint_lock);
-		if (fail)
+		if (genlmsg_put_peer_attrs(peer, skb))
 			goto err;
 		allowedips_node =
 			list_first_entry_or_null(&peer->allowedips_list,
@@ -233,7 +245,10 @@ static int wg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 				wg->incoming_port) ||
 		    nla_put_u32(skb, WGDEVICE_A_FWMARK, wg->fwmark) ||
 		    nla_put_u32(skb, WGDEVICE_A_IFINDEX, wg->dev->ifindex) ||
-		    nla_put_string(skb, WGDEVICE_A_IFNAME, wg->dev->name))
+		    nla_put_string(skb, WGDEVICE_A_IFNAME, wg->dev->name) ||
+		    nla_put_u8(skb, WGDEVICE_A_MONITOR,
+			       (wg->endpoint_monitor ? WGDEVICE_MONITOR_F_ENDPOINT : 0) |
+			       (wg->endpoint_monitor ? WGDEVICE_MONITOR_F_PEERS : 0)))
 			goto out;
 
 		down_read(&wg->static_identity.lock);
@@ -482,6 +497,9 @@ static int set_peer(struct wg_device *wg, struct nlattr **attrs)
 	if (netif_running(wg->dev))
 		wg_packet_send_staged_packets(peer);
 
+	if (wg->peers_monitor)
+		wg_genl_mcast_peer_set(peer);
+
 out:
 	wg_peer_put(peer);
 	if (attrs[WGPEER_A_PRESHARED_KEY])
@@ -535,6 +553,18 @@ static int wg_set_device(struct sk_buff *skb, struct genl_info *info)
 			nla_get_u16(info->attrs[WGDEVICE_A_LISTEN_PORT]));
 		if (ret)
 			goto out;
+	}
+
+	if (info->attrs[WGDEVICE_A_MONITOR]) {
+		u8 monitor = nla_get_u8(info->attrs[WGDEVICE_A_MONITOR]);
+
+		if (monitor & ~__WGDEVICE_MONITOR_F_ALL)
+			goto out;
+
+		wg->endpoint_monitor =
+			(monitor & WGDEVICE_MONITOR_F_ENDPOINT) == WGDEVICE_MONITOR_F_ENDPOINT;
+		wg->peers_monitor =
+			(monitor & WGDEVICE_MONITOR_F_PEERS) == WGDEVICE_MONITOR_F_PEERS;
 	}
 
 	if (flags & WGDEVICE_F_REPLACE_PEERS)
@@ -617,6 +647,12 @@ static const struct genl_ops genl_ops[] = {
 	}
 };
 
+static const struct genl_multicast_group wg_genl_mcgrps[] = {
+	{
+		.name = WG_MULTICAST_GROUP_PEERS
+	}
+};
+
 static struct genl_family genl_family __ro_after_init = {
 	.ops = genl_ops,
 	.n_ops = ARRAY_SIZE(genl_ops),
@@ -626,7 +662,9 @@ static struct genl_family genl_family __ro_after_init = {
 	.maxattr = WGDEVICE_A_MAX,
 	.module = THIS_MODULE,
 	.policy = device_policy,
-	.netnsok = true
+	.netnsok = true,
+	.mcgrps = wg_genl_mcgrps,
+	.n_mcgrps = ARRAY_SIZE(wg_genl_mcgrps)
 };
 
 int __init wg_genetlink_init(void)
@@ -637,4 +675,187 @@ int __init wg_genetlink_init(void)
 void __exit wg_genetlink_uninit(void)
 {
 	genl_unregister_family(&genl_family);
+}
+
+int wg_genl_mcast_peer_set(struct wg_peer *peer)
+{
+	struct sk_buff *skb;
+	void *hdr;
+	struct nlattr *allowedips_nest, *peer_nest;
+	struct allowedips_node *allowedips_node;
+	int fail = 0;
+
+	skb = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(skb, 0, 0, &genl_family, 0, WG_CMD_SET_PEER);
+	if (!hdr) {
+		fail = -EMSGSIZE;
+		goto err;
+	}
+
+	if (nla_put_u32(skb, WGDEVICE_A_IFINDEX, peer->device->dev->ifindex) ||
+	    nla_put_string(skb, WGDEVICE_A_IFNAME, peer->device->dev->name))
+		goto err;
+
+	peer_nest = nla_nest_start(skb, WGDEVICE_A_PEER);
+	if (!peer_nest) {
+		fail = -EMSGSIZE;
+		goto err;
+	}
+
+	down_read(&peer->handshake.lock);
+	fail = nla_put(skb, WGPEER_A_PUBLIC_KEY, NOISE_PUBLIC_KEY_LEN,
+		       peer->handshake.remote_static);
+	up_read(&peer->handshake.lock);
+	if (fail)
+		goto err;
+
+	if (genlmsg_put_peer_attrs(peer, skb))
+		goto err;
+
+	allowedips_node = list_first_entry_or_null(&peer->allowedips_list,
+						   struct allowedips_node, peer_list);
+	if (!allowedips_node)
+		goto no_allowedips;
+
+	allowedips_nest = nla_nest_start(skb, WGPEER_A_ALLOWEDIPS);
+	if (!allowedips_nest) {
+		fail = -EMSGSIZE;
+		goto err;
+	}
+
+	list_for_each_entry_from(allowedips_node, &peer->allowedips_list,
+				 peer_list) {
+		u8 cidr, ip[16] __aligned(__alignof(u64));
+		int family;
+
+		family = wg_allowedips_read_node(allowedips_node, ip, &cidr);
+		if (get_allowedips(skb, ip, cidr, family)) {
+			nla_nest_end(skb, allowedips_nest);
+			goto err;
+		}
+	}
+
+	nla_nest_end(skb, allowedips_nest);
+
+no_allowedips:
+	nla_nest_end(skb, peer_nest);
+	genlmsg_end(skb, hdr);
+	fail = genlmsg_multicast_netns(&genl_family, dev_net(peer->device->dev),
+				       skb, 0, 0, GFP_KERNEL);
+	return fail;
+
+err:
+	nlmsg_free(skb);
+	return fail;
+}
+
+int wg_genl_mcast_peer_remove(struct wg_peer *peer)
+{
+	struct sk_buff *skb;
+	void *hdr;
+	int fail = 0;
+	struct nlattr *peer_nest;
+
+	skb = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(skb, 0, 0, &genl_family, 0, WG_CMD_REMOVED_PEER);
+	if (!hdr) {
+		fail = -EMSGSIZE;
+		goto err;
+	}
+
+	if (nla_put_u32(skb, WGDEVICE_A_IFINDEX, peer->device->dev->ifindex) ||
+	    nla_put_string(skb, WGDEVICE_A_IFNAME, peer->device->dev->name)) {
+		fail = -EMSGSIZE;
+		goto err;
+	}
+
+	peer_nest = nla_nest_start(skb, WGDEVICE_A_PEER);
+	if (!peer_nest) {
+		fail = -EMSGSIZE;
+		goto err;
+	}
+
+	down_read(&peer->handshake.lock);
+	fail = nla_put(skb, WGPEER_A_PUBLIC_KEY, NOISE_PUBLIC_KEY_LEN,
+		       peer->handshake.remote_static);
+	up_read(&peer->handshake.lock);
+	if (fail)
+		goto err;
+
+	nla_nest_end(skb, peer_nest);
+	genlmsg_end(skb, hdr);
+	fail = genlmsg_multicast_netns(&genl_family, dev_net(peer->device->dev),
+				       skb, 0, 0, GFP_KERNEL);
+	return fail;
+
+err:
+	nlmsg_free(skb);
+	return fail;
+}
+
+int wg_genl_mcast_peer_endpoint_change(struct wg_peer *peer)
+{
+	struct sk_buff *skb;
+	struct nlattr *peer_nest;
+	void *hdr;
+	int fail = 0;
+
+	skb = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+
+	hdr = genlmsg_put(skb, 0, 0, &genl_family, 0, WG_CMD_CHANGED_ENDPOINT);
+	if (!hdr) {
+		fail = -EMSGSIZE;
+		goto err;
+	}
+
+	if (nla_put_u32(skb, WGDEVICE_A_IFINDEX, peer->device->dev->ifindex) ||
+	    nla_put_string(skb, WGDEVICE_A_IFNAME, peer->device->dev->name)) {
+		fail = -EMSGSIZE;
+		goto err;
+	}
+
+	peer_nest = nla_nest_start(skb, WGDEVICE_A_PEER);
+	if (!peer_nest) {
+		fail = -EMSGSIZE;
+		goto err;
+	}
+
+	down_read(&peer->handshake.lock);
+	fail = nla_put(skb, WGPEER_A_PUBLIC_KEY, NOISE_PUBLIC_KEY_LEN,
+		       peer->handshake.remote_static);
+	up_read(&peer->handshake.lock);
+	if (fail)
+		goto err;
+
+	read_lock_bh(&peer->endpoint_lock);
+	if (peer->endpoint.addr.sa_family == AF_INET)
+		fail = nla_put(skb, WGPEER_A_ENDPOINT,
+			       sizeof(peer->endpoint.addr4),
+			       &peer->endpoint.addr4);
+	else if (peer->endpoint.addr.sa_family == AF_INET6)
+		fail = nla_put(skb, WGPEER_A_ENDPOINT,
+			       sizeof(peer->endpoint.addr6),
+			       &peer->endpoint.addr6);
+	read_unlock_bh(&peer->endpoint_lock);
+	if (fail)
+		goto err;
+
+	nla_nest_end(skb, peer_nest);
+
+	genlmsg_end(skb, hdr);
+	fail = genlmsg_multicast_netns(&genl_family, dev_net(peer->device->dev),
+				       skb, 0, 0, GFP_KERNEL);
+	return fail;
+
+err:
+	nlmsg_free(skb);
+	return fail;
 }
