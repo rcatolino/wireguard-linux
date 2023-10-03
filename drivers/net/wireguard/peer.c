@@ -9,6 +9,7 @@
 #include "timers.h"
 #include "peerlookup.h"
 #include "noise.h"
+#include "netlink.h"
 
 #include <linux/kref.h>
 #include <linux/lockdep.h>
@@ -157,8 +158,11 @@ void wg_peer_remove(struct wg_peer *peer)
 {
 	if (unlikely(!peer))
 		return;
-	lockdep_assert_held(&peer->device->device_update_lock);
 
+	if (peer->device->peers_monitor)
+		wg_genl_mcast_peer_remove(peer);
+
+	lockdep_assert_held(&peer->device->device_update_lock);
 	peer_make_dead(peer);
 	synchronize_net();
 	peer_remove_after_dead(peer);

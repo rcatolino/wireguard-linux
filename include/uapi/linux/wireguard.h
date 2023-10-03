@@ -29,6 +29,7 @@
  *    WGDEVICE_A_PUBLIC_KEY: NLA_EXACT_LEN, len WG_KEY_LEN
  *    WGDEVICE_A_LISTEN_PORT: NLA_U16
  *    WGDEVICE_A_FWMARK: NLA_U32
+ *    WGDEVICE_A_MONITOR: NLA_U8
  *    WGDEVICE_A_PEERS: NLA_NESTED
  *        0: NLA_NESTED
  *            WGPEER_A_PUBLIC_KEY: NLA_EXACT_LEN, len WG_KEY_LEN
@@ -83,6 +84,9 @@
  *    WGDEVICE_A_PRIVATE_KEY: len WG_KEY_LEN, all zeros to remove
  *    WGDEVICE_A_LISTEN_PORT: NLA_U16, 0 to choose randomly
  *    WGDEVICE_A_FWMARK: NLA_U32, 0 to disable
+ *    WGDEVICE_A_MONITOR: NLA_U8, set to a value of wgdevice_monitor_flag to
+ *                      enable monitoring of events using multicast messages
+ *                      over netlink
  *    WGDEVICE_A_PEERS: NLA_NESTED
  *        0: NLA_NESTED
  *            WGPEER_A_PUBLIC_KEY: len WG_KEY_LEN
@@ -126,6 +130,64 @@
  * of a peer, it likely should not be specified in subsequent fragments.
  *
  * If an error occurs, NLMSG_ERROR will reply containing an errno.
+ *
+ * WG_CMD_CHANGED_ENDPOINT
+ * ----------------------
+ *
+ * This command is sent on the multicast group WG_MULTICAST_GROUP_PEERS
+ * when the endpoint of a peer is changed, either administratively or because
+ * of roaming.
+ * The kernel will send a single message containing the
+ * following tree of nested items:
+ *
+ *    WGDEVICE_A_IFINDEX: NLA_U32
+ *    WGDEVICE_A_IFNAME: NLA_NUL_STRING, maxlen IFNAMSIZ - 1
+ *    WGDEVICE_A_PEER: NLA_NESTED
+ *        WGPEER_A_PUBLIC_KEY: NLA_EXACT_LEN, len WG_KEY_LEN
+ *        WGPEER_A_ENDPOINT: NLA_MIN_LEN(struct sockaddr), struct sockaddr_in or struct sockaddr_in6
+ *
+ * WG_CMD_REMOVED_PEER
+ * -------------------
+ *
+ * This command is sent on the multicast group WG_MULTICAST_GROUP_PEERS
+ * when a peer is removed.
+ * The kernel will send a single message containing the
+ * following tree of nested items:
+ *
+ *    WGDEVICE_A_IFINDEX: NLA_U32
+ *    WGDEVICE_A_IFNAME: NLA_NUL_STRING, maxlen IFNAMSIZ - 1
+ *    WGDEVICE_A_PEER: NLA_NESTED
+ *        WGPEER_A_PUBLIC_KEY: NLA_EXACT_LEN, len WG_KEY_LEN
+ *
+ * WG_CMD_SET_PEER
+ * ---------------
+ *
+ * This command is sent on the multicast group WG_MULTICAST_GROUP_PEERS
+ * when a peer is added or changed.
+ * The kernel will send a single message containing the
+ * following tree of nested items:
+ *
+ *    WGDEVICE_A_IFINDEX: NLA_U32
+ *    WGDEVICE_A_IFNAME: NLA_NUL_STRING, maxlen IFNAMSIZ - 1
+ *    WGDEVICE_A_PEER: NLA_NESTED
+ *        WGPEER_A_PUBLIC_KEY: NLA_EXACT_LEN, len WG_KEY_LEN
+ *        WGPEER_A_PRESHARED_KEY: NLA_EXACT_LEN, len WG_KEY_LEN
+ *        WGPEER_A_ENDPOINT: NLA_MIN_LEN(struct sockaddr), struct sockaddr_in or struct sockaddr_in6
+ *        WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL: NLA_U16
+ *        WGPEER_A_LAST_HANDSHAKE_TIME: NLA_EXACT_LEN, struct __kernel_timespec
+ *        WGPEER_A_RX_BYTES: NLA_U64
+ *        WGPEER_A_TX_BYTES: NLA_U64
+ *        WGPEER_A_ALLOWEDIPS: NLA_NESTED
+ *            0: NLA_NESTED
+ *                WGALLOWEDIP_A_FAMILY: NLA_U16
+ *                WGALLOWEDIP_A_IPADDR:
+ *                    NLA_MIN_LEN(struct in_addr), struct in_addr or struct in6_addr
+ *                WGALLOWEDIP_A_CIDR_MASK: NLA_U8
+ *            0: NLA_NESTED
+ *                ...
+ *            0: NLA_NESTED
+ *                ...
+ *
  */
 
 #ifndef _WG_UAPI_WIREGUARD_H
@@ -136,9 +198,14 @@
 
 #define WG_KEY_LEN 32
 
+#define WG_MULTICAST_GROUP_PEERS          "peers"
+
 enum wg_cmd {
 	WG_CMD_GET_DEVICE,
 	WG_CMD_SET_DEVICE,
+	WG_CMD_CHANGED_ENDPOINT,
+	WG_CMD_REMOVED_PEER,
+	WG_CMD_SET_PEER,
 	__WG_CMD_MAX
 };
 #define WG_CMD_MAX (__WG_CMD_MAX - 1)
@@ -157,9 +224,16 @@ enum wgdevice_attribute {
 	WGDEVICE_A_LISTEN_PORT,
 	WGDEVICE_A_FWMARK,
 	WGDEVICE_A_PEERS,
+	WGDEVICE_A_MONITOR,
+	WGDEVICE_A_PEER,
 	__WGDEVICE_A_LAST
 };
 #define WGDEVICE_A_MAX (__WGDEVICE_A_LAST - 1)
+enum wgdevice_monitor_flag {
+	WGDEVICE_MONITOR_F_ENDPOINT = 1U << 0,
+	WGDEVICE_MONITOR_F_PEERS = 1U << 1,
+	__WGDEVICE_MONITOR_F_ALL = WGDEVICE_MONITOR_F_ENDPOINT | WGDEVICE_MONITOR_F_PEERS
+};
 
 enum wgpeer_flag {
 	WGPEER_F_REMOVE_ME = 1U << 0,
