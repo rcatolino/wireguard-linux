@@ -828,10 +828,11 @@ int wg_genl_mcast_peer_endpoint_change(struct wg_peer *peer)
 		goto err;
 	}
 
-	down_read(&peer->handshake.lock);
+    // according to handshake comments, remote_static is immutable and not protected by lock
+	// down_read(&peer->handshake.lock); // TODO: bug here (GPF ?)
 	fail = nla_put(skb, WGPEER_A_PUBLIC_KEY, NOISE_PUBLIC_KEY_LEN,
 		       peer->handshake.remote_static);
-	up_read(&peer->handshake.lock);
+	// up_read(&peer->handshake.lock);
 	if (fail)
 		goto err;
 
